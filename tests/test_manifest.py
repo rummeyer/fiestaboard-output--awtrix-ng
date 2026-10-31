@@ -59,6 +59,12 @@ def test_only_the_password_is_secret():
         "fade_style",
         "username",
         "password",
+        "native_rotation",
+        "firmware_transition_override",
+        "firmware_transition_effect",
+        "firmware_transition_direction",
+        "firmware_transition_duration_ms",
+        "firmware_auto_rotation",
     }
     secret = {name for name, p in props.items() if p.get("secret") or p.get("ui:widget") == "password"}
     assert secret == {"password"}

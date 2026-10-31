@@ -57,6 +57,9 @@ from typing import Any
 
 import requests
 
+from .native_rotation import NativeRotation
+from .firmware_transitions import FirmwareTransitions
+
 from src.plugins import (
     ActionOutcome,
     BoardToken,
@@ -85,6 +88,42 @@ try:
     from src.plugins import DevicePoll
 except ImportError:  # a core before the poll_device hook never polls: nothing to report
     DevicePoll = None  # type: ignore[assignment,misc]
+
+try:
+    from src.plugins import NativePageSelection
+except ImportError:
+    NativePageSelection = None
+
+# New flexible-frame SDK is optional: API-1 cores keep their existing paths.
+try:
+    from src.plugins import PhysicalSurface as _PhysicalSurface
+    from src.plugins import physical_frame_pixels as _physical_frame_pixels
+except ImportError:
+    _PhysicalSurface = None
+    _physical_frame_pixels = None
+
+
+def _physical_pixels(frame: Any) -> bytes | None:
+    if _PhysicalSurface is None or _physical_frame_pixels is None:
+        return None
+    return _physical_frame_pixels(frame, PANEL_WIDTH, PANEL_HEIGHT)
+
+
+def _with_physical_frames(capabilities: Any) -> Any:
+    if (
+        _PhysicalSurface is None
+        or _physical_frame_pixels is None
+        or getattr(capabilities, "physical_frames", None) is None
+    ):
+        return capabilities
+    return replace(
+        capabilities,
+        physical_frames={
+            **capabilities.physical_frames,
+            "ulanzi_tc002": _PhysicalSurface(PANEL_WIDTH, PANEL_HEIGHT, frozenset({"ordinary", "native"})),
+        },
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +444,17 @@ class AwtrixNG(OutputPluginBase):
         self._upload_failed = False
         #: The clock's ``uptimeSeconds`` last seen, and ``time.monotonic()`` then.
         self._uptime: tuple[float, float] | None = None
+        self._native = NativeRotation(self)
+        self._firmware = FirmwareTransitions(self)
+
+    @classmethod
+    def declared_capabilities(cls, manifest: Any) -> Any:
+        # Existing capability hooks let a newer SDK opt in without making the
+        # on-disk API-1 manifest unreadable by released cores.
+        return _with_physical_frames(super().declared_capabilities(manifest))
+
+    def capabilities(self) -> Any:
+        return _with_physical_frames(super().capabilities())
 
     # --- identity --------------------------------------------------------------------------
 
@@ -435,6 +485,9 @@ class AwtrixNG(OutputPluginBase):
 
     def render(self, frame: Sequence[Sequence[Any]]) -> bytes:
         """*frame* as the panel's 52 x 16 RGB888, row-major from the top left."""
+        physical = _physical_pixels(frame)
+        if physical is not None:
+            return physical
         return self._panel(rasterize(self.layout(frame)))
 
     @staticmethod
@@ -513,11 +566,21 @@ class AwtrixNG(OutputPluginBase):
         """One frame pushed, as a write verdict; ``None`` when it landed."""
         if cancel.cancelled:
             return WriteResult(True, False)
+        if self.config.get("native_rotation") is True and NativePageSelection is None:
+            logger.warning("Upgrade FiestaBoard to a core with native collection rotation, or turn the option off")
+            return WriteResult(False, False)
         try:
+            self._firmware.apply(cancel)
+            self._native.prepare_legacy(cancel)
+            if cancel.cancelled:
+                return WriteResult(True, False, superseded=True)
             self._request("PUT", PUSHED_PATH + self.app_name, json=self._payload(pixels))
+            self._native.legacy_written = True
+            if not self._native.legacy_checked:
+                self._native.retire(cancel)
         except RequestCancelled:
             # Core's cancel scope refused the request: preempted, not failed.
-            return WriteResult(True, False)
+            return WriteResult(True, False, superseded=True)
         except Exception as exc:
             logger.warning("AWTRIX %s: push failed: %s", self.host or "(no address)", exc)
             self._upload_failed = True
@@ -614,6 +677,24 @@ class AwtrixNG(OutputPluginBase):
 
     # --- writes --------------------------------------------------------------------------------
 
+    def sync_native_playlist(self, playlist: Any, *, cancel: CancelToken) -> WriteResult:
+        """Synchronize owned native apps; ordinary refreshes never select an app."""
+        if cancel.cancelled:
+            return WriteResult(True, False, superseded=True)
+        if self.config.get("native_rotation") is not True:
+            return WriteResult(False, False)
+        try:
+            sent = self._native.sync(playlist, cancel)
+        except RequestCancelled:
+            return WriteResult(True, False, superseded=True)
+        except Exception as exc:
+            logger.warning("AWTRIX native rotation failed: %s", exc)
+            self._upload_failed = True
+            return WriteResult(False, False)
+        self._upload_failed = False
+        return WriteResult(True, sent)
+
+
     def write(self, frame: CellFrame, *, native: Any, cancel: CancelToken) -> WriteResult:
         return self._still(self.render(frame), cancel)
 
@@ -634,6 +715,10 @@ class AwtrixNG(OutputPluginBase):
         board's ``fade_style`` is ``blend``. Every other kind is planned with
         core's renderer at the stream rate and played as paced stills.
         """
+        # Physical frames already own their geometry. Preserve their final bytes;
+        # the legacy cell transition planner cannot mix these two coordinate spaces.
+        if _physical_pixels(before) is not None or _physical_pixels(after) is not None:
+            return self._still(self.render(after), cancel)
         if transition.spec == "none":
             return self._still(self.render(after), cancel)
         spec = transition.spec
@@ -737,13 +822,35 @@ class AwtrixNG(OutputPluginBase):
             return None
         before = self._uptime
         try:
-            self._device_state()
+            state = self._device_state()
         except Exception:
             return None
         restarted = False
         if before is not None and self._uptime is not None and self._uptime is not before:
             (was, seen_at), (now, now_at) = before, self._uptime
             restarted = now < was + (now_at - seen_at) - UPTIME_SLACK_S
+        selection = None
+        if self._native.reference is not None:
+            try:
+                rows = self._native.inventory(CancelToken())
+                present = {row["name"] for row in rows if row["present"]}
+                restarted = restarted or bool(set(self._native.pages) - present)
+            except Exception:
+                # The device read already advanced our uptime baseline. Do not
+                # lose a confirmed restart just because inventory is unavailable.
+                if not restarted:
+                    return None
+            if NativePageSelection is not None:
+                selection = NativePageSelection(self._native.pages.get(state.get("currentApp")))
+        if restarted:
+            self._native.payloads.clear()
+            self._native.validated = False
+            self._native.order_confirmed = False
+            self._firmware.confirmed = False
+        if selection is not None:
+            recover = restarted or self._upload_failed
+            self._upload_failed = False
+            return DevicePoll(restarted=recover, native_selection=selection)
         if not (restarted or self._upload_failed):
             return None
         logger.info(
@@ -755,6 +862,9 @@ class AwtrixNG(OutputPluginBase):
         return DevicePoll(restarted=True)
 
     def check_connection(self) -> ConnectionCheck:
+        if self.config.get("native_rotation") is True and NativePageSelection is None:
+            return self._failed("bad_response", "Upgrade FiestaBoard to use native collection rotation.",
+                                "Native playlist SDK is unavailable", "Turn native collection rotation off on older core.")
         where = self.host or "the clock"
         try:
             body = self._device_state()
@@ -801,9 +911,29 @@ class AwtrixNG(OutputPluginBase):
             return self._failed(
                 "bad_response", f"{where} answered, but not like AWTRIX NG.", "no boardType", "Check that this address is an AWTRIX NG clock."
             )
+        if self.config.get("native_rotation") is True or self.config.get("firmware_transition_override") is True:
+            try:
+                capabilities = self._request("GET", "/api/v1/capabilities", setup=True)
+                display = capabilities.get("display", {}) if isinstance(capabilities, dict) else {}
+                if (display.get("width"), display.get("height")) != (PANEL_WIDTH, PANEL_HEIGHT):
+                    raise AwtrixBadResponse("Native controls require a verified 52 x 16 TC002")
+                if capabilities.get("layout") is not True:
+                    raise AwtrixBadResponse("Native controls require TC002 layout capability")
+            except Exception as exc:
+                return self._failed("bad_response", str(exc), str(exc), "Check the TC002 firmware and display capabilities.")
         details = {key: body[key] for key in ("version", "hostname", "currentApp") if key in body}
         version = f" (AWTRIX NG {body['version']})" if body.get("version") else ""
-        return ConnectionCheck(success=True, message=f"Connected to the TC002 at {where}{version}.", details=details)
+        message = f"Connected to the TC002 at {where}{version}."
+        if self.config.get("firmware_transition_override") is True:
+            try:
+                _, current = self._firmware.inspect(None)
+            except Exception as exc:
+                return self._failed("bad_response", f"Firmware transition settings: {exc}", str(exc),
+                                    "Choose settings advertised by this device, or turn the override off.")
+            keys = ("transitionEffect", "transitionDirection", "transitionDurationMs", "autoTransition")
+            details["firmware_transitions"] = {key: current.get(key) for key in keys}
+            message += f" Firmware transitions: {current.get('transitionEffect')}, {current.get('transitionDurationMs')} ms, {current.get('transitionDirection')}; automatic rotation {'on' if current.get('autoTransition') else 'off'}."
+        return ConnectionCheck(success=True, message=message, details=details)
 
     @staticmethod
     def _failed(failure: Any, message: str, error: str, *steps: str) -> ConnectionCheck:

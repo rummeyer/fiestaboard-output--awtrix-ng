@@ -10,8 +10,8 @@ on:
       core_ref:
         description: "FiestaBoard ref to test against (branch, tag or SHA)"
         required: false
-        # Keep in step with `ref:` below.
-        default: next
+        # Empty uses the released/flexible compatibility matrix.
+        default: ""
 
 permissions:
   contents: read
@@ -22,7 +22,16 @@ concurrency:
 
 jobs:
   test:
-    name: Tests and output conformance
+    name: Tests and output conformance (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: released-10.3
+            core_ref: v10.3.0
+          - name: flexible-pages
+            # Optional SDK from core PR #2395; keep the compatibility check pinned.
+            core_ref: 1a94b34b90213648433fe7bf90b77be8c9300de3
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,9 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Fiestaboard/FiestaBoard
-          # The output-plugin API (output_api 1) is on `next` (FiestaBoard 10
-          # beta). Once 10.0.0 is released, pin its tag.
-          ref: ${{ inputs.core_ref || 'next' }}
+          ref: ${{ inputs.core_ref || matrix.core_ref }}
           path: fiestaboard-core
 
       - uses: actions/setup-python@v5

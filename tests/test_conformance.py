@@ -40,6 +40,19 @@ def decode(payload):
 
 def make_plugin(board_id, config, transport):
     # The suite routes self.http to its fake device itself.
+    if not getattr(transport, "_awtrix_inventory", False):
+        original = transport.http_send
+
+        def http_send(request):
+            # Preserve the suite's latency, recording and injected failures;
+            # specialize only the actual firmware inventory response shape.
+            response = original(request)
+            if request.method == "GET" and request.url.endswith("/api/v1/apps"):
+                response._content = b"[]"
+            return response
+
+        transport.http_send = http_send
+        transport._awtrix_inventory = True
     return AwtrixNG(board_id, config)
 
 

@@ -1,7 +1,7 @@
 {
   "id": "ulanzi_tc002",
   "name": "Ulanzi TC002 (AWTRIX NG)",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Show your FiestaBoard pages on a Ulanzi TC002 running AWTRIX NG, as an app in its rotation, over your local network.",
   "author": "Oliver Rummeyer",
   "repository": "https://github.com/rummeyer/fiestaboard-output--ulanzi-tc002",
@@ -127,6 +127,114 @@
           "description": "Only when the clock's web UI asks for a password.",
           "secret": true,
           "ui:widget": "password"
+        },
+        "native_rotation": {
+          "type": "boolean",
+          "title": "Native collection rotation",
+          "description": "Let the clock rotate timed collections and use its left/right buttons to change pages. Requires FiestaBoard's native playlist support. Single pages use one slot; random/rule collections keep FiestaBoard rotation. Off preserves the existing behavior.",
+          "default": false
+        },
+        "firmware_transition_override": {
+          "type": "boolean",
+          "title": "Override firmware transitions",
+          "description": "Apply the selected settings to the whole TC002, including other native apps. Off leaves device settings untouched. This is separate from FiestaBoard page animations.",
+          "default": false
+        },
+        "firmware_transition_effect": {
+          "type": "string",
+          "title": "Firmware transition effect",
+          "description": "Used when the clock switches native apps. The selected effect must be advertised by the connected firmware.",
+          "enum": [
+            "device",
+            "Random",
+            "Slide",
+            "Dim",
+            "Zoom",
+            "Rotate",
+            "Pixelate",
+            "Curtain",
+            "Ripple",
+            "Blink",
+            "Reload",
+            "Fade",
+            "Cover",
+            "Uncover",
+            "Split",
+            "Blinds",
+            "Blocks",
+            "Flash",
+            "Diamond",
+            "Wave",
+            "Rain",
+            "Melt",
+            "Interlace"
+          ],
+          "enumNames": [
+            "Use device settings",
+            "Random",
+            "Slide",
+            "Dim",
+            "Zoom",
+            "Rotate",
+            "Pixelate",
+            "Curtain",
+            "Ripple",
+            "Blink",
+            "Reload",
+            "Fade",
+            "Cover",
+            "Uncover",
+            "Split",
+            "Blinds",
+            "Blocks",
+            "Flash",
+            "Diamond",
+            "Wave",
+            "Rain",
+            "Melt",
+            "Interlace"
+          ],
+          "default": "device"
+        },
+        "firmware_transition_direction": {
+          "type": "string",
+          "title": "Firmware transition direction",
+          "description": "Reverse movement without changing app order; symmetric effects are unchanged.",
+          "enum": [
+            "device",
+            "normal",
+            "reverse"
+          ],
+          "enumNames": [
+            "Use device settings",
+            "Normal",
+            "Reverse"
+          ],
+          "default": "device"
+        },
+        "firmware_transition_duration_ms": {
+          "type": "integer",
+          "title": "Firmware transition duration (ms)",
+          "description": "Blank uses the device setting. Zero switches instantly. Applies device-wide when the override is on.",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "ui:placeholder": "Use device settings"
+        },
+        "firmware_auto_rotation": {
+          "type": "string",
+          "title": "Automatic firmware rotation",
+          "description": "Off stops automatic native-app rotation; buttons and API navigation still work. Does not stop FiestaBoard updates.",
+          "enum": [
+            "device",
+            "on",
+            "off"
+          ],
+          "enumNames": [
+            "Use device settings",
+            "On",
+            "Off"
+          ],
+          "default": "device"
         }
       },
       "required": [
